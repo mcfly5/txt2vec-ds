@@ -2,6 +2,7 @@
 
 Everything that must be identical on both sides (vector names, BM25 model and
 language, dense embedding model) lives here so indexing and querying cannot drift.
+The dense model is served by Infinity through its OpenAI-compatible embeddings API.
 """
 
 from config import Configuration
@@ -26,7 +27,12 @@ def get_qdrant_client(conf: Configuration) -> QdrantClient:
 
 
 def get_emb_client(conf: Configuration) -> Client:
-    return Client(base_url=conf.llm_base_url, api_key=conf.llm_api_key)
+    return Client(
+        base_url=conf.emb_base_url,
+        # The openai SDK requires a key; Infinity ignores it unless started with --api-key.
+        api_key=conf.emb_api_key or "EMPTY",
+        timeout=getattr(conf, "emb_timeout", 30),
+    )
 
 
 def get_bm25_model(conf: Configuration) -> SparseTextEmbedding:
@@ -44,8 +50,11 @@ def embed_dense(
 ) -> list[list[float]]:
     vectors = []
     for start in range(0, len(texts), batch_size):
+        # The SDK requests base64 by default; ask for plain floats explicitly.
         data = client.embeddings.create(
-            input=texts[start : start + batch_size], model=conf.embedder_name
+            input=texts[start : start + batch_size],
+            model=conf.embedder_name,
+            encoding_format="float",
         ).data
         vectors.extend(item.embedding for item in sorted(data, key=lambda d: d.index))
     return vectors
