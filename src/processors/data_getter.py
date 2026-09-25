@@ -34,13 +34,14 @@ class DataGetter(Processor):
 
     def __call__(self, query: MessageEvent) -> Documents:
         logger.info(f"calling DataGetter with tags: {query.tags}")
-        docs = self.retrieve(query.message, query.tags, self.conf.k_document)
+        docs = self.retrieve(query.message, query.tags, self.conf.k_documents)
         if self.reranker and docs:
             logger.info("Using reranker")
-            docs = self.reranker(query.message, docs)
-        return Documents(
-            query=query.message, documents=docs[: self.conf.r_documents], event=query
-        )
+            docs = self.reranker(query.message, docs, top_n=self.conf.g_documents)
+        # Also covers use_reranker=False: the generator gets the top RRF results.
+        docs = docs[: self.conf.g_documents]
+        logger.info(f"{len(docs)} docs passed to generator")
+        return Documents(query=query.message, documents=docs, event=query)
 
     def retrieve(
         self, query: str, tags: list[str] | None, k_documents: int = 10

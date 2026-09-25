@@ -15,7 +15,8 @@ class Configuration(DigitalConfig):
     reranker_base_url: str = 'http://infinity:7997'
     reranker_api_key: str = ''
     use_reranker: bool = True
-    k_document: int = 10
+    k_documents: int = 100  # candidates after hybrid search (reranker input)
+    g_documents: int = 10  # documents passed to the generator
     qdrant_url: str = 'https://qdrant.k8s-test'
     qdrant_collection: str = 'documents'
     max_tasks: int = 10

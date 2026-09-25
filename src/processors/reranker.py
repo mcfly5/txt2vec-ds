@@ -26,21 +26,26 @@ class Reranker(Processor):
         )
         logger.info(f'Reranker: {conf.reranker_name} at {conf.reranker_base_url}')
 
-    def __call__(self, query: str, documents: List[Document]) -> List[Document]:
+    def __call__(
+        self, query: str, documents: List[Document], top_n: int | None = None
+    ) -> List[Document]:
         logger.info(f'calling Reranker with query: {query}')
-        return self.rerank(query, documents)
+        return self.rerank(query, documents, top_n)
 
-    def rerank(self, query: str, documents: List[Document]) -> List[Document]:
+    def rerank(
+        self, query: str, documents: List[Document], top_n: int | None = None
+    ) -> List[Document]:
+        """Return the `top_n` most relevant documents (all of them if `top_n` is None)."""
+        payload = {
+            'model': self.conf.reranker_name,
+            'query': query,
+            'documents': [doc.page_content for doc in documents],
+            'return_documents': False,
+        }
+        if top_n is not None:
+            payload['top_n'] = top_n
         try:
-            response = self.client.post(
-                '/rerank',
-                json={
-                    'model': self.conf.reranker_name,
-                    'query': query,
-                    'documents': [doc.page_content for doc in documents],
-                    'return_documents': False,
-                },
-            )
+            response = self.client.post('/rerank', json=payload)
             response.raise_for_status()
             results = response.json()['results']
         except Exception as err:
@@ -49,9 +54,9 @@ class Reranker(Processor):
             metric_sender.send_metric(
                 name=Measures.error_code,
                 value=ErrorCodes.RERANKER_ERROR)
-            return documents
+            return documents[:top_n]
 
-        results = sorted(results, key=lambda r: r['relevance_score'], reverse=True)
+        results = sorted(results, key=lambda r: r['relevance_score'], reverse=True)[:top_n]
         logger.debug(f'Reranking scores: {[r["relevance_score"] for r in results]}')
         reranked = []
         for result in results:

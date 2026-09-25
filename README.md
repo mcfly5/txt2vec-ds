@@ -37,9 +37,9 @@ The collection and payload indexes are created by `Txt2Vec` on startup if they d
 ## Retrieval (`DataGetter`)
 
 1. The query is embedded with the same dense model as at indexing time, and with BM25 `query_embed()`.
-2. One `query_points` request runs two prefetches, `emb` and `bm25`, each returning `prefetch_k` candidates. They're merged with Reciprocal Rank Fusion (RRF) into the top `k_document`.
+2. One `query_points` request runs two prefetches, `emb` and `bm25`, each returning `prefetch_k` candidates. They're merged with Reciprocal Rank Fusion (RRF) into the top `k_documents` candidates (100 by default).
 3. If `tags` is non-empty, both prefetches are filtered with `tags` matching any of them. Empty tags or `None` means no filter.
-4. If `use_reranker` is set, the candidates are reranked by Infinity (`reranker_base_url`, model `reranker_name`), and the top `r_documents` are returned. The reranker score is stored in `metadata["rerank_score"]`. If the reranker request fails, the error is logged and reported (`RERANKER_ERROR`), and the documents keep their RRF order.
+4. If `use_reranker` is set, all `k_documents` candidates are reranked by Infinity (`reranker_base_url`, model `reranker_name`), and only the top `g_documents` (10 by default) are passed to the generator. Without the reranker, the top `g_documents` by RRF are passed. The reranker score is stored in `metadata["rerank_score"]`. If the reranker request fails, the error is logged and reported (`RERANKER_ERROR`), and the top `g_documents` by RRF are passed instead.
 
 Results are `langchain_core.documents.Document` objects. `metadata` contains the payload metadata plus `tags`, `id` and `score`. The score is the RRF score, which is rank-based and not comparable to cosine similarity, so don't threshold it.
 
@@ -54,8 +54,8 @@ Used from `Configuration`:
 | `reranker_base_url`, `reranker_api_key`, `reranker_name` | retrieval | Infinity rerank endpoint, API key and model |
 | `emb_size` | indexing | dense vector size (used when creating the collection) |
 | `tokenizer_name` | indexing | HF tokenizer used for chunk sizing |
-| `k_document` | retrieval | candidates after fusion (input to the reranker) |
-| `r_documents` | retrieval | documents returned |
+| `k_documents` | retrieval | candidates after fusion, input to the reranker (default `100`) |
+| `g_documents` | retrieval | documents passed to the generator (default `10`), should be ≤ `k_documents` |
 | `use_reranker` | retrieval | enable the reranker |
 
 Optional (read with defaults):
