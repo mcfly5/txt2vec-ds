@@ -10,6 +10,7 @@ class Configuration(DigitalConfig):
     embedder_name: str = 'models/USER-bge-m3'
     emb_base_url: str = 'http://infinity:7997'
     emb_api_key: str = ''
+    emb_verify_ssl: bool = False
     emb_size: int = 768
     reranker_name: str = 'models/bge-reranker-v2-m3'
     reranker_base_url: str = 'http://infinity:7997'

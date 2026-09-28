@@ -32,7 +32,7 @@ The collection and payload indexes are created by `Txt2Vec` on startup if they d
 1. The markdown is split by `#`, `##` and `###` headers. Sections longer than 500 tokens (`tokenizer_name`) are split again, with no overlap.
 2. The header path (`Header 1 > Header 2 > ...`) is prepended to each chunk's text before embedding. The splitter strips headers from the content, and adding them back gives both vectors the section context. The payload `document` stores the chunk text without the header path.
 3. Dense embeddings are requested in batches of 32. BM25 embeddings use `embed()`.
-4. Points are upserted in batches of 128. Then any points of the same `source` that weren't overwritten (left over from an older, longer version of the document) are deleted. Re-ingesting a source replaces it and doesn't create duplicates.
+4. Points are upserted in batches of 32; a batch rejected with 413 (proxy body size limit) is split in half until it fits. Then any points of the same `source` that weren't overwritten (left over from an older, longer version of the document) are deleted. Re-ingesting a source replaces it and doesn't create duplicates.
 
 ## Retrieval (`DataGetter`)
 
@@ -67,6 +67,8 @@ Optional (read with defaults):
 | `emb_timeout` | `30` | embeddings request timeout, seconds |
 | `reranker_timeout` | `30` | rerank request timeout, seconds |
 | `qdrant_verify_ssl` | `False` | TLS certificate verification for Qdrant. Enable it if the certificate is valid. |
+| `emb_verify_ssl` | `True` | TLS certificate verification for the Infinity embeddings server. `True`, `False`, or a path to a CA bundle. |
+| `reranker_verify_ssl` | `True` | the same for the Infinity rerank server |
 | `bm25_language` | `"english"` | BM25 stemmer and stopwords language, e.g. `"russian"` |
 
 The BM25 model files are loaded from the local `models` directory.

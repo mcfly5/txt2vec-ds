@@ -6,6 +6,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_text_splitters.markdown import ExperimentalMarkdownSyntaxTextSplitter
 from loguru import logger
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     FieldCondition,
@@ -30,7 +31,7 @@ from src.utils.metrics import ErrorCodes, Measures, metric_sender
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 HEADERS_TO_SPLIT = [("#", "Header 1"), ("##", "Header 2"), ("###", "Header 3")]
-UPSERT_BATCH_SIZE = 128
+UPSERT_BATCH_SIZE = 32
 
 
 class Txt2Vec(Processor):
@@ -152,7 +153,10 @@ class Txt2Vec(Processor):
             bm25_embeds = list(self.bm25_model.embed(texts))
             dense_embeds = embed_dense(self.emb_client, self.conf, texts)
         except Exception as err:
-            logger.error(f"Error while embedding chunks: {err}")
+            logger.error(
+                f"Error while embedding chunks via {self.conf.emb_base_url}: "
+                f"{err!r}, cause: {err.__cause__!r}"
+            )
             metric_sender.send_metric(
                 name=Measures.error_code, value=ErrorCodes.EMBEDDINGS_ERROR
             )
@@ -187,10 +191,7 @@ class Txt2Vec(Processor):
 
         try:
             for start in range(0, len(points), UPSERT_BATCH_SIZE):
-                self.client.upsert(
-                    collection_name=self.conf.qdrant_collection,
-                    points=points[start : start + UPSERT_BATCH_SIZE],
-                )
+                self._upsert_batch(points[start : start + UPSERT_BATCH_SIZE])
             # Drop points of an older version of this source that were not overwritten.
             self.client.delete(
                 collection_name=self.conf.qdrant_collection,
@@ -210,6 +211,21 @@ class Txt2Vec(Processor):
             )
             raise err
         logger.info(f"{len(points)} points upserted")
+
+    def _upsert_batch(self, points: list[PointStruct]) -> None:
+        # The proxy in front of Qdrant limits the request body size; a dense
+        # vector is ~20 KB as JSON, so split the batch until it fits.
+        try:
+            self.client.upsert(
+                collection_name=self.conf.qdrant_collection, points=points
+            )
+        except UnexpectedResponse as err:
+            if err.status_code != 413 or len(points) == 1:
+                raise
+            logger.warning(f"Batch of {len(points)} points is too large, splitting")
+            half = len(points) // 2
+            self._upsert_batch(points[:half])
+            self._upsert_batch(points[half:])
 
     def delete_documents_by_source(self, source: str) -> dict:
         """Delete all documents from Qdrant collection with the specified source.

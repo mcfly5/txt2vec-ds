@@ -7,7 +7,7 @@ The dense model is served by Infinity through its OpenAI-compatible embeddings A
 
 from config import Configuration
 from fastembed import SparseTextEmbedding
-from openai import Client
+from openai import Client, DefaultHttpxClient
 from qdrant_client import QdrantClient, models
 
 DENSE_VECTOR = "emb"
@@ -32,6 +32,7 @@ def get_emb_client(conf: Configuration) -> Client:
         # The openai SDK requires a key; Infinity ignores it unless started with --api-key.
         api_key=conf.emb_api_key or "EMPTY",
         timeout=getattr(conf, "emb_timeout", 30),
+        http_client=DefaultHttpxClient(verify=getattr(conf, "emb_verify_ssl", True)),
     )
 
 

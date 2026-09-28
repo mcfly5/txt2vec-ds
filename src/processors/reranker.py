@@ -23,6 +23,7 @@ class Reranker(Processor):
             base_url=conf.reranker_base_url,
             headers=headers,
             timeout=getattr(conf, "reranker_timeout", 30),
+            verify=getattr(conf, "reranker_verify_ssl", True),
         )
         logger.info(f'Reranker: {conf.reranker_name} at {conf.reranker_base_url}')
 
