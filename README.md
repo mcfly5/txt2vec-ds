@@ -9,6 +9,8 @@ Indexing of markdown documents into Qdrant and hybrid (dense + BM25) retrieval o
 | `src/processors/txt2vec.py` | `Txt2Vec`: splits a document into chunks, embeds them (dense + BM25) and upserts them into Qdrant. Also deletes documents by source. |
 | `src/processors/data_getter.py` | `DataGetter`: hybrid search for a user query, optional reranking. |
 | `src/processors/reranker.py` | `Reranker`: reorders candidates using the cross-encoder served by Infinity (`POST /rerank`). |
+| `src/processors/generation_processor.py` | `Generation`: builds the prompt from the retrieved documents and calls the LLM (`src/llm_agent.py`). |
+| `src/tracing.py` | Langfuse client setup and helpers for the query-path traces. |
 | `src/processors/vector_store.py` | Settings shared by indexing and retrieval: vector names, BM25 model, Qdrant and embedding clients. Both sides must use the same settings, so change them only here. |
 
 ## Collection schema
@@ -70,10 +72,32 @@ Optional (read with defaults):
 | `emb_verify_ssl` | `True` | TLS certificate verification for the Infinity embeddings server. `True`, `False`, or a path to a CA bundle. |
 | `reranker_verify_ssl` | `True` | the same for the Infinity rerank server |
 | `bm25_language` | `"english"` | BM25 stemmer and stopwords language, e.g. `"russian"` |
+| `langfuse_host` | `''` | Langfuse server URL |
+| `langfuse_public_key`, `langfuse_secret_key` | `''` | Langfuse project keys. Tracing is off while either is empty. Set them through the environment. |
+| `langfuse_environment` | `''` | Langfuse environment label, e.g. `test`, `prod` |
 
 The BM25 model files are loaded from the local `models` directory.
 
 The embedder and the reranker can run on one Infinity server (point both URLs at it) or on separate servers. `embedder_name` and `reranker_name` must match the model ids that Infinity serves (`--served-model-name`, or `--model-id` if that isn't set). Include Infinity's `--url-prefix` in the base URLs if one is set.
+
+## Observability (Langfuse)
+
+Each user message becomes one Langfuse trace (SDK v3, needs Langfuse server v3+):
+
+```
+trace "rag-query"   session = conversation_id, tags = query tags, input = message, output = response
+├─ retrieval          DataGetter: the documents passed to the generator (source, headers, scores, text)
+│  ├─ hybrid-search   query, tags, limits; candidates with RRF scores
+│  └─ rerank          index -> relevance_score; level ERROR if the reranker failed
+└─ generation         Generation: response, doc_array
+   └─ llm             the LLM call (langfuse.openai): messages, model, token usage, latency
+```
+
+`DataGetter` starts the trace and stores its id in `MessageEvent.trace_id`, and `Generation` adds its spans to the same trace. `MessageEvent` needs a `trace_id: str | None = None` field for this. Without it, a warning is logged, and the generation goes into a separate trace.
+
+Tracing is disabled while `langfuse_public_key` or `langfuse_secret_key` is empty. Spans are exported in the background, and export failures don't affect requests. Indexing (`Txt2Vec`, `scripts/load_docs.py`) isn't traced.
+
+If the Langfuse server uses a certificate from an internal CA, point `OTEL_EXPORTER_OTLP_CERTIFICATE` (span export) and `SSL_CERT_FILE` (API calls) at the CA bundle.
 
 ## Re-indexing
 

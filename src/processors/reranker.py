@@ -3,6 +3,7 @@ from typing import List
 import httpx
 from blocks import Processor
 from langchain_core.documents import Document
+from langfuse import get_client, observe
 from loguru import logger
 
 from config import Configuration
@@ -33,6 +34,7 @@ class Reranker(Processor):
         logger.info(f'calling Reranker with query: {query}')
         return self.rerank(query, documents, top_n)
 
+    @observe(name='rerank', capture_input=False, capture_output=False)
     def rerank(
         self, query: str, documents: List[Document], top_n: int | None = None
     ) -> List[Document]:
@@ -45,6 +47,15 @@ class Reranker(Processor):
         }
         if top_n is not None:
             payload['top_n'] = top_n
+        langfuse = get_client()
+        langfuse.update_current_span(
+            input={
+                'model': self.conf.reranker_name,
+                'query': query,
+                'n_documents': len(documents),
+                'top_n': top_n,
+            }
+        )
         try:
             response = self.client.post('/rerank', json=payload)
             response.raise_for_status()
@@ -52,6 +63,9 @@ class Reranker(Processor):
         except Exception as err:
             # Reranking only improves the order; keep the fused order if it's unavailable.
             logger.error(f"Reranker request failed, keeping retrieval order: {err}")
+            langfuse.update_current_span(
+                level='ERROR', status_message=f'Rerank failed, retrieval order kept: {err}'
+            )
             metric_sender.send_metric(
                 name=Measures.error_code,
                 value=ErrorCodes.RERANKER_ERROR)
@@ -59,6 +73,12 @@ class Reranker(Processor):
 
         results = sorted(results, key=lambda r: r['relevance_score'], reverse=True)[:top_n]
         logger.debug(f'Reranking scores: {[r["relevance_score"] for r in results]}')
+        langfuse.update_current_span(
+            output=[
+                {'index': r['index'], 'relevance_score': r['relevance_score']}
+                for r in results
+            ]
+        )
         reranked = []
         for result in results:
             doc = documents[result['index']]

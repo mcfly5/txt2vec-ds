@@ -23,6 +23,11 @@ class Configuration(DigitalConfig):
     max_tasks: int = 10
     metrics_topic: str = 'nlp_assistant_metrics'
     backend_callback_url: str = 'https://nlp-assistant-backend.k8s/api/v1/model_result'
+    # Langfuse tracing; disabled while the keys are empty. Set the keys via env.
+    langfuse_host: str = ''
+    langfuse_public_key: str = ''
+    langfuse_secret_key: str = ''
+    langfuse_environment: str = ''
 
     @property
     def app_name(self) -> str:
