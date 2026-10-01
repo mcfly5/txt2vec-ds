@@ -23,6 +23,7 @@ class Configuration(DigitalConfig):
     max_tasks: int = 10
     metrics_topic: str = 'nlp_assistant_metrics'
     backend_callback_url: str = 'https://nlp-assistant-backend.k8s/api/v1/model_result'
+    backend_callback_timeout: float = 10.0  # seconds
     # Langfuse tracing; disabled while the keys are empty. Set the keys via env.
     langfuse_host: str = ''
     langfuse_public_key: str = ''

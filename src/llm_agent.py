@@ -14,7 +14,7 @@ class LLMAgent():
             api_key=conf.llm_api_key,
         )
 
-    def call(self, question: str, system: str = '') -> ChatCompletionMessage | None:
+    def call(self, question: str, system: str = '') -> ChatCompletionMessage:
         if not system:
             system = self.conf.llm_system_prompt
         try:
@@ -28,6 +28,6 @@ class LLMAgent():
             )
         except Exception as e:
             logger.error(f'Error of LLM call: {str(e)}')
-            return None
+            raise
 
         return completion.choices[0].message

@@ -4,7 +4,7 @@ from langchain_core.documents import Document
 from langfuse import get_client, observe
 from loguru import logger
 from qdrant_client import models
-from src.events import Documents, MessageEvent
+from src.events import Documents, MessageEvent, ResponseErrorCode
 from src.processors.reranker import Reranker
 from src.processors.vector_store import (
     DENSE_VECTOR,
@@ -17,6 +17,14 @@ from src.processors.vector_store import (
 )
 from src.tracing import doc_summary, init_langfuse, new_trace_id, set_trace_id
 from src.utils.utils import ErrorCodes, Measures, metric_sender
+
+
+class RetrievalError(Exception):
+    """Retrieval failure tagged with the error code reported to the backend."""
+
+    def __init__(self, code: ResponseErrorCode, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class DataGetter(Processor):
@@ -50,10 +58,22 @@ class DataGetter(Processor):
                 tags=query.tags or [],
                 input=query.message,
             )
-            docs = self.retrieve(query.message, query.tags, self.conf.k_documents)
-            if self.reranker and docs:
-                logger.info("Using reranker")
-                docs = self.reranker(query.message, docs, top_n=self.conf.g_documents)
+            # Errors are not raised further: Generation turns the failed event into a
+            # failed ResponseEvent, so the backend is still notified.
+            try:
+                docs = self.retrieve(query.message, query.tags, self.conf.k_documents)
+                if self.reranker and docs:
+                    logger.info("Using reranker")
+                    docs = self.reranker(query.message, docs, top_n=self.conf.g_documents)
+            except RetrievalError as err:
+                query.fail(err.code, err)
+                docs = []
+            except Exception as err:
+                logger.exception(f"Retrieval failed: {err}")
+                query.fail(ResponseErrorCode.INTERNAL_ERROR, err)
+                docs = []
+            if query.error_code:
+                span.update(level="ERROR", status_message=query.error_message)
             # Also covers use_reranker=False: the generator gets the top RRF results.
             docs = docs[: self.conf.g_documents]
             logger.info(f"{len(docs)} docs passed to generator")
@@ -77,7 +97,7 @@ class DataGetter(Processor):
             metric_sender.send_metric(
                 name=Measures.error_code, value=ErrorCodes.EMBEDDINGS_ERROR
             )
-            raise err
+            raise RetrievalError(ResponseErrorCode.EMBEDDINGS_ERROR, f"embed: {err}") from err
 
         tags_filter = (
             models.Filter(
@@ -127,7 +147,7 @@ class DataGetter(Processor):
             metric_sender.send_metric(
                 name=Measures.error_code, value=ErrorCodes.QDRANT_ERROR
             )
-            raise err
+            raise RetrievalError(ResponseErrorCode.QDRANT_ERROR, f"qdrant: {err}") from err
 
         docs = [
             Document(

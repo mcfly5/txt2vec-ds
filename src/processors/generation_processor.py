@@ -3,7 +3,7 @@ from langfuse.types import TraceContext
 from loguru import logger
 
 from config import Configuration
-from src.events import Documents, ResponseEvent
+from src.events import Documents, ResponseErrorCode, ResponseEvent, ResponseStatus
 from src.prompts import prompt_gen
 from src.llm_agent import LLMAgent
 from src.tracing import init_langfuse
@@ -21,14 +21,30 @@ class Generation(Processor):
         with self.langfuse.start_as_current_span(
             name='generation', trace_context=trace_context
         ) as span:
-            response = self.generate(documents)
-            span.update(output={'response': response.response, 'doc_array': response.doc_array})
+            # Always produce a ResponseEvent: the callback must notify the backend on failures too.
+            try:
+                response = self.generate(documents)
+            except Exception as err:
+                logger.exception(f'Generation failed: {err}')
+                documents.event.fail(ResponseErrorCode.INTERNAL_ERROR, err)
+                response = self.build_response(documents)
+            span.update(output=response.model_dump(exclude={'conversation_id', 'trace_id'}))
+            if response.status == ResponseStatus.FAILED:
+                span.update(level='ERROR', status_message=response.error_message)
             span.update_trace(output=response.response)
         return response
 
     def generate(self, documents: Documents) -> ResponseEvent:
         self.query = documents.query
         self.documents = documents.documents
+        event = documents.event
+        if event.status == ResponseStatus.FAILED:
+            logger.warning(f'Skip generation, retrieval failed: {event.error_message}')
+            return self.build_response(documents)
+        if not self.documents:
+            logger.info('No documents retrieved, skip generation')
+            event.status = ResponseStatus.NO_DOCUMENTS
+            return self.build_response(documents)
         logger.info('Started generation')
 
         prompt = prompt_gen.format(
@@ -37,16 +53,29 @@ class Generation(Processor):
                                 doc in enumerate(self.documents)]) if self.documents else ''
         )
         logger.debug(prompt)
-        llm_response = self.llm.call(prompt)
+        try:
+            llm_response = self.llm.call(prompt)
+        except Exception as err:
+            event.fail(ResponseErrorCode.LLM_ERROR, err)
+            return self.build_response(documents)
         logger.info(llm_response)
-        if llm_response:
-            documents.event.response = llm_response.content
-            if self.documents:
-                documents.event.doc_array = [doc.metadata['source'] for doc in self.documents]
+        if not llm_response.content:
+            event.fail(ResponseErrorCode.LLM_ERROR, 'Empty LLM response')
+            return self.build_response(documents)
+        event.response = llm_response.content
+        event.doc_array = [doc.metadata['source'] for doc in self.documents]
+        return self.build_response(documents)
 
-        response = ResponseEvent(
-            conversation_id=documents.event.conversation_id,
-            response=documents.event.response,
-            doc_array=documents.event.doc_array
+    @staticmethod
+    def build_response(documents: Documents) -> ResponseEvent:
+        event = documents.event
+        completed = event.status == ResponseStatus.COMPLETED
+        return ResponseEvent(
+            conversation_id=event.conversation_id,
+            response=event.response if completed else '',
+            doc_array=event.doc_array if completed else [],
+            status=event.status,
+            error_code=event.error_code,
+            error_message=event.error_message,
+            trace_id=event.trace_id,
         )
-        return response

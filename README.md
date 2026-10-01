@@ -99,6 +99,23 @@ Tracing is disabled while `langfuse_public_key` or `langfuse_secret_key` is empt
 
 If the Langfuse server uses a certificate from an internal CA, point `OTEL_EXPORTER_OTLP_CERTIFICATE` (span export) and `SSL_CERT_FILE` (API calls) at the CA bundle.
 
+## Checking parsed documents
+
+The PDF parser sometimes drops parts of a document, which shows up as a jump in the numbering (e.g. 7.6 is followed by 7.9). Download the files (`scripts/download_s3.py`) and check them before indexing:
+
+```
+python scripts/check_numbering.py s3_dump --report numbering_report.csv
+```
+
+Numbered lines are found at the line start: plain (`7.6.`, `3)`), in markdown headers (`## 7.6 Title`) or after a keyword (`Статья 7.6`, `Глава 3`, `п. 2.1`). Articles, chapters, sections and points are checked as separate sequences. Nested lists and restarts at 1 (e.g. the body after the table of contents) aren't reported.
+
+The CSV report (`file, stream, line, prev, got, missing, kind, text`) has two kinds of rows:
+
+- `gap`: numbers are missing, most likely lost text. Re-parse the document.
+- `out_of_order`: a number that doesn't continue the sequence (a cross-reference at the line start, a stray number, or a jump bigger than `--max-gap`, 20 by default). Worth a look, but usually not lost text.
+
+The script exits with 1 if any gap is found. Files without numbered lines are listed in the log as not checked.
+
 ## Re-indexing
 
 Re-index the whole collection (drop it and ingest all documents again) after changing any of these:
