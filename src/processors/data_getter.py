@@ -1,7 +1,7 @@
 from blocks import Processor
 from config import Configuration
 from langchain_core.documents import Document
-from langfuse import get_client, observe
+from langfuse import get_client
 from loguru import logger
 from qdrant_client import models
 from src.events import Documents, MessageEvent, ResponseErrorCode
@@ -15,7 +15,13 @@ from src.processors.vector_store import (
     get_qdrant_client,
     to_sparse_vector,
 )
-from src.tracing import doc_summary, init_langfuse, new_trace_id, set_trace_id
+from src.tracing import (
+    doc_summary,
+    init_langfuse,
+    new_trace_id,
+    observe_span,
+    set_trace_id,
+)
 from src.utils.utils import ErrorCodes, Measures, metric_sender
 
 
@@ -80,7 +86,7 @@ class DataGetter(Processor):
             span.update(output=[doc_summary(doc, with_text=True) for doc in docs])
         return Documents(query=query.message, documents=docs, event=query)
 
-    @observe(name="hybrid-search", capture_input=False, capture_output=False)
+    @observe_span("hybrid-search")
     def retrieve(
         self, query: str, tags: list[str] | None, k_documents: int = 10
     ) -> list[Document]:

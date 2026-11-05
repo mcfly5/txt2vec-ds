@@ -6,12 +6,17 @@ Tracing is disabled when the Langfuse keys are empty; the SDK then turns
 spans and the langfuse.openai wrapper into no-ops.
 """
 
+from typing import Any, Callable, TypeVar, cast
+
 from config import Configuration
 from langchain_core.documents import Document
-from langfuse import Langfuse
+from langfuse import Langfuse, observe
 from loguru import logger
+from pydantic import BaseModel
 
 _client: Langfuse | None = None
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 def init_langfuse(conf: Configuration) -> Langfuse:
@@ -39,12 +44,22 @@ def new_trace_id() -> str:
     return Langfuse.create_trace_id()
 
 
-def set_trace_id(event, trace_id: str) -> None:
+def set_trace_id(event: BaseModel, trace_id: str) -> None:
     # A failure here must not break the request; the generator then starts its own trace.
     try:
-        event.trace_id = trace_id
+        # setattr: the event may have no trace_id field; pydantic then raises ValueError.
+        setattr(event, "trace_id", trace_id)
     except (AttributeError, ValueError) as err:
         logger.warning(f"Can't store trace_id on {type(event).__name__}: {err}")
+
+
+def observe_span(name: str) -> Callable[[F], F]:
+    """langfuse.observe that keeps the decorated function's type. Input and output
+    aren't captured; the spans set them with update_current_span."""
+    return cast(
+        Callable[[F], F],
+        observe(name=name, capture_input=False, capture_output=False),
+    )
 
 
 def doc_summary(doc: Document, with_text: bool = False) -> dict:

@@ -9,7 +9,8 @@ Indexing of markdown documents into Qdrant and hybrid (dense + BM25) retrieval o
 | `src/processors/txt2vec.py` | `Txt2Vec`: splits a document into chunks, embeds them (dense + BM25) and upserts them into Qdrant. Also deletes documents by source. |
 | `src/processors/data_getter.py` | `DataGetter`: hybrid search for a user query, optional reranking. |
 | `src/processors/reranker.py` | `Reranker`: reorders candidates using the cross-encoder served by Infinity (`POST /rerank`). |
-| `src/processors/generation_processor.py` | `Generation`: builds the prompt from the retrieved documents and calls the LLM (`src/llm_agent.py`). |
+| `src/processors/generation_processor.py` | `Generation`: builds the prompt from the retrieved documents, calls the LLM (`src/llm_agent.py`) and builds the `ResponseEvent` with its status. |
+| `src/processors/callback.py` | `Callback`: posts the `ResponseEvent` to the backend (`backend_callback_url`). |
 | `src/tracing.py` | Langfuse client setup and helpers for the query-path traces. |
 | `src/processors/vector_store.py` | Settings shared by indexing and retrieval: vector names, BM25 model, Qdrant and embedding clients. Both sides must use the same settings, so change them only here. |
 
@@ -43,7 +44,38 @@ The collection and payload indexes are created by `Txt2Vec` on startup if they d
 3. If `tags` is non-empty, both prefetches are filtered with `tags` matching any of them. Empty tags or `None` means no filter.
 4. If `use_reranker` is set, all `k_documents` candidates are reranked by Infinity (`reranker_base_url`, model `reranker_name`), and only the top `g_documents` (10 by default) are passed to the generator. Without the reranker, the top `g_documents` by RRF are passed. The reranker score is stored in `metadata["rerank_score"]`. If the reranker request fails, the error is logged and reported (`RERANKER_ERROR`), and the top `g_documents` by RRF are passed instead.
 
+If embedding or the Qdrant query fails, `DataGetter` doesn't raise. It marks the event as failed (see [Response status](#response-status-backend-callback)) and passes an empty document list on, so the backend is still notified.
+
 Results are `langchain_core.documents.Document` objects. `metadata` contains the payload metadata plus `tags`, `id` and `score`. The score is the RRF score, which is rank-based and not comparable to cosine similarity, so don't threshold it.
+
+## Response status (backend callback)
+
+Every query ends with exactly one `POST` of `ResponseEvent` to `backend_callback_url`:
+
+| Field | Meaning |
+|---|---|
+| `conversation_id` | from the incoming `MessageEvent` |
+| `response` | answer text; `""` unless `status` is `completed` |
+| `doc_array` | `metadata.source` of the documents passed to the LLM; `[]` unless `completed` |
+| `status` | `completed`, `no_documents` or `failed` |
+| `error_code` | `null` unless `failed` |
+| `error_message` | exception text, at most 500 characters; for logs, not for users |
+| `trace_id` | Langfuse trace id |
+
+| `status` | When | `error_code` |
+|---|---|---|
+| `completed` | the LLM answered using the retrieved documents | `null` |
+| `no_documents` | retrieval found nothing (e.g. no document matches the tags); the LLM isn't called | `null` |
+| `failed` | embedding the query failed | `EMBEDDINGS_ERROR` |
+| | the Qdrant query failed | `QDRANT_ERROR` |
+| | the LLM call raised or returned empty content | `LLM_ERROR` |
+| | any other error in retrieval or generation | `INTERNAL_ERROR` |
+
+A reranker failure doesn't change the status: the RRF order is used and the query is `completed`.
+
+The status travels on `MessageEvent` (`status`, `error_code`, `error_message`, set with `MessageEvent.fail()`), and `Generation` copies it into `ResponseEvent`. The values are defined in `src/events.py` (`ResponseStatus`, `ResponseErrorCode`). The backend is owned by another team, so agree any change to these fields or values with them first.
+
+If the callback request fails, times out (`backend_callback_timeout`) or returns 4xx/5xx, the error is logged and reported (`BACKEND_ERROR`). It isn't retried.
 
 ## Configuration
 
@@ -59,6 +91,8 @@ Used from `Configuration`:
 | `k_documents` | retrieval | candidates after fusion, input to the reranker (default `100`) |
 | `g_documents` | retrieval | documents passed to the generator (default `10`), should be ≤ `k_documents` |
 | `use_reranker` | retrieval | enable the reranker |
+| `backend_callback_url` | callback | backend endpoint for the `ResponseEvent` |
+| `backend_callback_timeout` | callback | callback request timeout, seconds (default `10`) |
 
 Optional (read with defaults):
 
@@ -89,9 +123,11 @@ trace "rag-query"   session = conversation_id, tags = query tags, input = messag
 ├─ retrieval          DataGetter: the documents passed to the generator (source, headers, scores, text)
 │  ├─ hybrid-search   query, tags, limits; candidates with RRF scores
 │  └─ rerank          index -> relevance_score; level ERROR if the reranker failed
-└─ generation         Generation: response, doc_array
+└─ generation         Generation: response, doc_array, status, error_code, error_message
    └─ llm             the LLM call (langfuse.openai): messages, model, token usage, latency
 ```
+
+`retrieval` and `generation` get level ERROR when the query failed, with `error_message` as the status message.
 
 `DataGetter` starts the trace and stores its id in `MessageEvent.trace_id`, and `Generation` adds its spans to the same trace. `MessageEvent` needs a `trace_id: str | None = None` field for this. Without it, a warning is logged, and the generation goes into a separate trace.
 
@@ -125,3 +161,36 @@ Re-index the whole collection (drop it and ingest all documents again) after cha
 - the chunking, or the text that is embedded (header path)
 
 Queries have to be embedded exactly the way the documents were.
+
+## Evaluation
+
+`scripts/run_eval.py` runs a CSV of questions through the query path and saves the answers. Each question goes through `DataGetter` (hybrid search, reranker if `use_reranker`) and `Generation` with the service configuration. The backend callback is skipped.
+
+```
+python scripts/run_eval.py questions.csv --dataset safety-qa
+python scripts/run_eval.py questions.csv --dataset safety-qa --run-name rerank-off --limit 5
+```
+
+The CSV needs the columns `conversation_id` (integer) and `query`; other columns are ignored. The delimiter (`,`, `;` or tab) is detected from the header.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--dataset` | required | Langfuse dataset name; created if it doesn't exist |
+| `--run-name` | `eval-<timestamp>` | Langfuse dataset run name |
+| `--out` | `<csv>_results_<run name>.csv` | output CSV |
+| `--tags` | none | retrieval tags for all questions |
+| `--environment` | `eval` | Langfuse environment of the traces, keeps them apart from prod |
+| `--limit` | all | run only the first N questions |
+
+The output CSV (UTF-8 with BOM, opens in Excel) has `conversation_id, query, response, status, error_code, error_message, doc_array, trace_id, trace_url, latency_s`. It's written row by row, so a crash keeps the answers so far. A failed question gets `status=failed` and doesn't stop the run.
+
+The Langfuse keys are required. Each question is a regular `rag-query` trace (see [Observability](#observability-langfuse)). The questions are upserted as items of the dataset (the item id is derived from the dataset, `conversation_id` and `query`, so re-running a CSV doesn't duplicate them), and each trace is linked to its item as part of the run. In Langfuse, Datasets → `<dataset>` → Runs shows the runs side by side, with the configuration of each run (`use_reranker`, `k_documents`, `g_documents`, models, collection, tags) in its metadata. Scores can be added to the traces there.
+
+## Tests
+
+```
+pip install -r requirements-test.txt
+pytest
+```
+
+The tests don't need Qdrant, Infinity, Langfuse or the LLM: the clients are replaced with fakes. The in-house modules that aren't in this repo (`blocks`, `config`, `src.utils`, `wunderkafka`, and the indexing events used by `Txt2Vec`) are stubbed in `tests/conftest.py`. The tokenizer is a word-level one built in the test, so no model is downloaded.

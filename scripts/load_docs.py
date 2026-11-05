@@ -1,4 +1,4 @@
-"""Load documents listed in a CSV into a (new) Qdrant collection.
+"""Load documents listed in a CSV or found in a local folder into a (new) Qdrant collection.
 
 CSV columns: name_file, source, s3_url.
 Each file is downloaded from s3_url and indexed with Txt2Vec, so chunking,
@@ -6,16 +6,23 @@ embeddings and point ids are the same as in the service. The file content must
 be markdown or plain text; the encoding is detected if it isn't UTF-8
 (e.g. cp1251). name_file is only used in logs.
 
+With --dir, every file under the folder with one of the --ext extensions
+(.md and .txt by default) is loaded instead; hidden files and folders are
+skipped. The source is the path relative to the folder (docs/a.md), with
+--source-prefix prepended if given.
+
 The dense vector size is taken from the embedder itself, so the new collection
 always matches the model.
 
 Usage (inside the app container, from the project root):
     python scripts/load_docs.py docs.csv --collection documents_v2
     python scripts/load_docs.py docs.csv --collection documents_v2 --tags kb --skip-existing
+    python scripts/load_docs.py --dir s3_dump --collection documents_v2 --source-prefix s3://my-bucket/
 
 s3:// urls are read with boto3; credentials and endpoint come from the usual
 AWS_* env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL).
-http(s):// urls (e.g. presigned) are downloaded directly.
+http(s):// urls (e.g. presigned) are downloaded directly, file:// urls are
+read from the local disk.
 """
 
 import argparse
@@ -23,6 +30,7 @@ import csv
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -38,10 +46,15 @@ REQUIRED_COLUMNS = {"name_file", "source", "s3_url"}
 
 def read_rows(csv_path: Path) -> list[dict]:
     with csv_path.open(newline="", encoding="utf-8-sig") as f:
-        sample = f.read(4096)
+        # The delimiter is detected from the header only: free text in the rows
+        # (commas inside quoted values) can make the sniffer fail.
+        header = f.readline()
         f.seek(0)
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-        reader = csv.DictReader(f, dialect=dialect)
+        try:
+            delimiter = csv.Sniffer().sniff(header, delimiters=",;\t").delimiter
+        except csv.Error:
+            delimiter = ","
+        reader = csv.DictReader(f, delimiter=delimiter)
         missing = REQUIRED_COLUMNS - set(reader.fieldnames or [])
         if missing:
             raise SystemExit(f"CSV has no columns: {sorted(missing)}")
@@ -49,6 +62,30 @@ def read_rows(csv_path: Path) -> list[dict]:
             {k: (v or "").strip() for k, v in row.items() if k in REQUIRED_COLUMNS}
             for row in reader
         ]
+
+
+def read_dir(root: Path, exts: list[str], source_prefix: str = "") -> list[dict]:
+    """Rows in the read_rows format for the files under root."""
+    if not root.is_dir():
+        raise SystemExit(f"Not a folder: {root}")
+    exts = {e.lower() if e.startswith(".") else f".{e.lower()}" for e in exts}
+    rows = []
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if not path.is_file() or path.suffix.lower() not in exts:
+            continue
+        rows.append(
+            {
+                "name_file": rel.as_posix(),
+                "source": source_prefix + rel.as_posix(),
+                "s3_url": path.resolve().as_uri(),
+            }
+        )
+    if not rows:
+        raise SystemExit(f"No {sorted(exts)} files in {root}")
+    return rows
 
 
 class Downloader:
@@ -73,6 +110,8 @@ class Downloader:
             response = self.http.get(url)
             response.raise_for_status()
             return response.content
+        if parsed.scheme == "file":
+            return Path(url2pathname(parsed.path)).read_bytes()
         raise ValueError(f"Unsupported url scheme: {url}")
 
 
@@ -103,7 +142,18 @@ def source_exists(txt2vec: Txt2Vec, source: str) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("csv", type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("csv", type=Path, nargs="?", help="CSV with the documents")
+    source.add_argument("--dir", type=Path, help="load all files from this folder instead")
+    parser.add_argument(
+        "--ext",
+        nargs="+",
+        default=[".md", ".txt"],
+        help="file extensions to load with --dir",
+    )
+    parser.add_argument(
+        "--source-prefix", default="", help="prepended to the relative path with --dir"
+    )
     parser.add_argument("--collection", required=True, help="target collection")
     parser.add_argument("--tags", nargs="*", default=[], help="tags for all documents")
     parser.add_argument(
@@ -132,7 +182,10 @@ def main() -> None:
             f"model returns {emb_size}. Use another collection name."
         )
 
-    rows = read_rows(args.csv)
+    if args.dir:
+        rows = read_dir(args.dir, args.ext, args.source_prefix)
+    else:
+        rows = read_rows(args.csv)
     downloader = Downloader(args.verify_ssl)
     loaded, skipped, failed = 0, 0, []
 

@@ -3,10 +3,11 @@ from typing import List
 import httpx
 from blocks import Processor
 from langchain_core.documents import Document
-from langfuse import get_client, observe
+from langfuse import get_client
 from loguru import logger
 
 from config import Configuration
+from src.tracing import observe_span
 from src.utils.utils import Measures, ErrorCodes, metric_sender
 
 
@@ -34,7 +35,7 @@ class Reranker(Processor):
         logger.info(f'calling Reranker with query: {query}')
         return self.rerank(query, documents, top_n)
 
-    @observe(name='rerank', capture_input=False, capture_output=False)
+    @observe_span('rerank')
     def rerank(
         self, query: str, documents: List[Document], top_n: int | None = None
     ) -> List[Document]:
