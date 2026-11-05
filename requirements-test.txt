@@ -1,0 +1,16 @@
+# Third-party packages needed to run the tests; in-house modules are stubbed in tests/conftest.py.
+pytest
+pydantic>=2
+langchain<1
+langchain-core
+langchain-text-splitters
+qdrant-client
+langfuse>=3,<4
+openai
+httpx
+requests
+loguru
+fastembed
+transformers
+charset-normalizer
+boto3

@@ -6,7 +6,7 @@ The dense model is served by Infinity through its OpenAI-compatible embeddings A
 """
 
 from config import Configuration
-from fastembed import SparseTextEmbedding
+from fastembed import SparseEmbedding, SparseTextEmbedding
 from openai import Client, DefaultHttpxClient
 from qdrant_client import QdrantClient, models
 
@@ -49,7 +49,7 @@ def get_bm25_model(conf: Configuration) -> SparseTextEmbedding:
 def embed_dense(
     client: Client, conf: Configuration, texts: list[str], batch_size: int = 32
 ) -> list[list[float]]:
-    vectors = []
+    vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
         # The SDK requests base64 by default; ask for plain floats explicitly.
         data = client.embeddings.create(
@@ -61,7 +61,7 @@ def embed_dense(
     return vectors
 
 
-def to_sparse_vector(embedding) -> models.SparseVector:
+def to_sparse_vector(embedding: SparseEmbedding) -> models.SparseVector:
     return models.SparseVector(
         indices=embedding.indices.tolist(), values=embedding.values.tolist()
     )
